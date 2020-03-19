@@ -1,0 +1,135 @@
+
+function [modelParameters,spikes,reachingAngle] = positionEstimatorTraining(trial)
+
+%% Find firing rates and avg hand position
+
+%Initalise the arrays 
+spike_rate = [];
+firingRates = [];
+x_velocity_arr = [];
+y_velocity_arr = [];
+handpos_x_max = [];
+handpos_y_max = [];
+
+%Initialise structures 
+trial_new = struct([]);
+velocity = struct([]);
+
+%optimal bin size 18/19
+dt = 17; % bin size
+lag = 6; %optimal lag 6
+for k = 1:8
+    for i = 1:98
+        %check this 80 = no. of training trials, work on length function
+        for n = 1:length(trial)
+            %run til lag and dt, 
+            %use only step size of 1 to have a sliding window
+            for t = 320:5:length(trial(n,k).spikes)-dt-lag  
+                % find the firing rates for a single neuron 
+                number_of_spikes = length(find(trial(n,k).spikes(i,t-lag:t+dt+lag)==1));
+                %find firing rates and put into an array
+                spike_rate = cat(2, spike_rate, number_of_spikes/((dt+2*lag)*0.001));
+                %find the max hand position at the end of end training data
+                %set to find the max trajectory 
+                %98 neurons firing contributes to one hand position
+                if t == length(trial(n,k).spikes)-dt-lag && i ==1
+                    handpos_x_max(n,k) = trial(n,k).handPos(1,t+dt+lag);
+                    handpos_y_max(n,k) = trial(n,k).handPos(2,t+dt+lag);
+                end
+                %find velcoity using the rate of change of the hand
+                %position
+                if i == 1
+                x_velocity = (trial(n,k).handPos(1,t+dt) - trial(n,k).handPos(1,t))/(dt*0.001);
+                y_velocity = (trial(n,k).handPos(2,t+dt) - trial(n,k).handPos(2,t))/(dt*0.001);
+                x_velocity_arr = cat(2, x_velocity_arr , x_velocity) ;             
+                y_velocity_arr = cat(2, y_velocity_arr ,y_velocity) ; 
+                end              
+            end
+            % store firing rate of one neural unit for every trial in one array
+            firingRates = cat(2, firingRates, spike_rate);
+            %reset spike rate counter
+            spike_rate = [];
+            
+        end
+        %set firing rates and velocity to struct
+        trial_new(i,k).firingRates = firingRates;
+        velocity(k).xvel = x_velocity_arr;
+        velocity(k).yvel = y_velocity_arr;
+        firingRates = [];    
+
+    end
+    %clear array to update
+    x_velocity_arr = [];
+    y_velocity_arr = [];
+end
+
+
+%% Linear Regression
+%form linear regression model 
+linear_regress = struct([]);
+
+%for each angle bin, find the max hand postion of any trajectory for the
+%100 trials
+for k = 1:8
+        avg_max_x(k) = mean(nonzeros(handpos_x_max(:,k)));
+        avg_max_y(k) = mean(nonzeros(handpos_y_max(:,k)));
+        %store in linear regression structure
+        linear_regress(k).maxx = avg_max_x(k);
+        linear_regress(k).maxy = avg_max_y(k);
+end
+
+%for each hand bin for the firing rate
+for k=1:8
+    firingRate = [];
+    for i=1:98
+        %extract firing rate for single bin
+        firingRate = cat(1, firingRate, trial_new(i,k).firingRates);
+    end
+    %update linear regression model specific to each hand bin
+    %pinv = least squares regression using singular value decomposition
+    %between the firing rate and the velocity
+    linear_regress(k).xpos = pinv(firingRate)'*velocity(k).xvel';
+    linear_regress(k).ypos = pinv(firingRate)'*velocity(k).yvel'; 
+    %ridge regression
+%     linear_regress(k).xpos = ridge((firingRate)'*velocity(k).xvel)';
+%     linear_regress(k).ypos = pinv(firingRate)'*velocity(k).yvel'; 
+    
+end
+
+%% KNN Classifier
+% used to predict the reaching angle from the first 320ms
+%first find the spike count for each trial and neuron
+
+spikes = [];
+reachingAngle = [];
+spike_count = zeros(length(trial),98);
+
+for k = 1:8
+    for i = 1:98
+        %run for each of the training data trials 
+        for n = 1:length(trial)
+            %find number of spikes
+            spike_locations = find(trial(n,k).spikes(i,1:320)==1);
+            number_of_spikes = length(spike_locations);
+            spike_count(n,i) = number_of_spikes;
+        end
+    end
+    spikes = cat(1, spikes, spike_count);
+    %label each of the neurons in one reaching angle with correct label 
+    reaching_angle(1:length(trial)) = k;
+    %form array for reaching angles 
+    reachingAngle = cat(2, reachingAngle, reaching_angle);
+end
+
+%update modelParameters with the new LR updates
+%creates a struct with 16 arrays, 8 for all the hand bins by 2 for the xpos
+%and ypos
+modelParameters = struct('LR',linear_regress,'KNN_spikes',spikes,'KNN_reaching',reachingAngle); 
+
+%function to calculate the ridge coefficents for a ridge regression
+function ridgecoeff = ridge(x , y, kparam)
+    ridgecoeff = inv(x*x' + kparam*eye(98))*x*y';
+end 
+
+end
+
